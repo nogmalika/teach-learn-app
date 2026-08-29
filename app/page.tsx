@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { db } from "@/lib/firebase";
+import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 
 interface Message {
   role: "user" | "student" | "teacher" | "system";
@@ -15,6 +17,7 @@ export default function Home() {
   const [exchangeCount, setExchangeCount] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [isFinished, setIsFinished] = useState(false);
+  const [savedStatus, setSavedStatus] = useState<string | null>(null);
 
   const getBotLevel = () => {
     if (exchangeCount <= 1) return { name: "🐣 bot (Lv.1: 初心者)", color: "text-amber-600 bg-amber-50" };
@@ -90,7 +93,22 @@ export default function Home() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
-      setMessages((prev) => [...prev, { role: "teacher", content: data.reply }]);
+      const teacherReview = data.reply;
+      const finalMessages: Message[] = [...messages, { role: "teacher", content: teacherReview }];
+      setMessages(finalMessages);
+
+      try {
+        await addDoc(collection(db, "learning_sessions"), {
+          topic,
+          exchangeCount,
+          messages: finalMessages,
+          createdAt: serverTimestamp(),
+        });
+        setSavedStatus("✅ 学習履歴をクラウドに保存しました！");
+      } catch (dbErr) {
+        console.error("Firestore Save Error:", dbErr);
+        setSavedStatus("⚠️ データベースへの保存をスキップしました");
+      }
     } catch (err: any) {
       alert("採点エラー: " + err.message);
     } finally {
@@ -168,6 +186,9 @@ export default function Home() {
                   </div>
                 </div>
               ))}
+              {savedStatus && (
+                <div className="text-xs text-emerald-600 text-center font-bold">{savedStatus}</div>
+              )}
               {isLoading && <div className="text-xs text-slate-400 text-center animate-pulse">botが考え中...</div>}
             </div>
 
