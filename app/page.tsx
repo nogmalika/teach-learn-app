@@ -7,6 +7,7 @@ import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 interface Message {
   role: "user" | "student" | "teacher" | "system";
   content: string;
+  questionType?: string;
 }
 
 interface ReviewResult {
@@ -34,9 +35,9 @@ export default function Home() {
   const [savedStatus, setSavedStatus] = useState<string | null>(null);
 
   const getBotLevel = () => {
-    if (exchangeCount <= 1) return { name: "🐣 Lv.1 (定義・目的)", color: "text-amber-600 bg-amber-50" };
-    if (exchangeCount <= 3) return { name: "🐥 Lv.2 (前提・反例)", color: "text-blue-600 bg-blue-50" };
-    return { name: "🦉 Lv.3 (境界・応用)", color: "text-purple-600 bg-purple-50" };
+    if (exchangeCount <= 1) return { name: "🐣 Lv.1 (定義・明確化)", color: "text-amber-600 bg-amber-50" };
+    if (exchangeCount <= 3) return { name: "🐥 Lv.2 (前提・メカニズム)", color: "text-blue-600 bg-blue-50" };
+    return { name: "🦉 Lv.3 (反例・境界推論)", color: "text-purple-600 bg-purple-50" };
   };
 
   const handleStart = async () => {
@@ -44,7 +45,6 @@ export default function Home() {
     setIsLoading(true);
 
     try {
-      // 1. 必須キーワードを自動生成
       const initRes = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -57,7 +57,7 @@ export default function Home() {
       setIsStarted(true);
 
       const firstMsg = `「${topic}」について教えてください！そもそもこれは何のためにあって、一言で言うとどういう概念なんですか？`;
-      setMessages([{ role: "student", content: firstMsg }]);
+      setMessages([{ role: "student", content: firstMsg, questionType: "定義・明確化" }]);
     } catch (err: any) {
       alert("開始エラー: " + err.message);
     } finally {
@@ -99,19 +99,20 @@ export default function Home() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
-      // 先生が出た場合はエラー深度をインクリメント、生徒ならリセット
       if (data.responderRole === "teacher") {
         setErrorCount((prev) => prev + 1);
       } else {
         setErrorCount(0);
       }
 
-      // カバー済みキーワードの更新
       if (data.newlyCoveredKeywords && data.newlyCoveredKeywords.length > 0) {
         setCoveredKeywords((prev) => Array.from(new Set([...prev, ...data.newlyCoveredKeywords])));
       }
 
-      setMessages((prev) => [...prev, { role: data.responderRole || "student", content: data.reply }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: data.responderRole || "student", content: data.reply, questionType: data.questionType },
+      ]);
     } catch (err: any) {
       alert("エラー: " + err.message);
     } finally {
@@ -190,7 +191,6 @@ export default function Home() {
             )}
           </div>
 
-          {/* リアルタイムキーワードチェックリスト */}
           {isStarted && targetKeywords.length > 0 && (
             <div className="mt-3 pt-3 border-t border-indigo-500/50">
               <div className="text-[11px] font-semibold text-indigo-200 mb-1.5 flex justify-between">
@@ -223,7 +223,7 @@ export default function Home() {
             <div className="text-5xl mb-4">🐣 ➡️ 🦉</div>
             <h2 className="text-xl font-bold text-slate-800 mb-2">何を教えますか？</h2>
             <p className="text-sm text-slate-500 mb-6 max-w-sm">
-              テーマを入力すると重要概念が自動設定されます。生徒に教えながらキーワードの全制覇を目指しましょう！
+              ソクラテス式の深い問いかけに答えながら理解を定着させます。困ったらいつでも「わからない」と入力してください。
             </p>
             <div className="w-full max-w-md flex gap-2">
               <input
@@ -254,13 +254,20 @@ export default function Home() {
                     m.role === "user" ? "items-end" : m.role === "teacher" ? "items-center" : "items-start"
                   }`}
                 >
-                  <span className="text-[10px] text-slate-400 font-bold mb-1">
-                    {m.role === "user"
-                      ? "あなた (先生役)"
-                      : m.role === "student"
-                      ? "生徒bot"
-                      : `🎓 先生AI (ヒント段階 ${Math.min(errorCount || 1, 3)})`}
-                  </span>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className="text-[10px] text-slate-400 font-bold">
+                      {m.role === "user"
+                        ? "あなた (先生役)"
+                        : m.role === "student"
+                        ? "生徒bot"
+                        : `🎓 先生AI (ヒント段階 ${Math.min(errorCount || 1, 3)})`}
+                    </span>
+                    {m.questionType && (
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-600 border border-indigo-200 font-semibold">
+                        💡 {m.questionType}
+                      </span>
+                    )}
+                  </div>
                   <div
                     className={`p-3 rounded-2xl max-w-[85%] text-sm leading-relaxed whitespace-pre-wrap ${
                       m.role === "user"
