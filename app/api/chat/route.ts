@@ -9,58 +9,73 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Gemini API key is not configured." }, { status: 500 });
     }
 
-    let systemInstruction = "";
-    let contents = [];
-    let temperature = 0.4;
-    let responderRole: "student" | "teacher" = "student";
-
     if (mode === "chat") {
-      const giveUpPatterns = /わからない|わかりません|知らん|教えて|無理|忘れた|ギブ/i;
-      const isUserGivingUp = giveUpPatterns.test(lastUserMessage || "");
+      // 先生AIか生徒AIかを判定するための統合プロンプト
+      const systemInstruction = `
+あなたは「${topic}」の学習セッションを管理するAIシステムです。
+以下の対話ログと、直前のユーザーの発言を「${topic}」の正確な学術的・科学的事実と照らし合わせて分析してください。
 
-      if (isUserGivingUp) {
-        responderRole = "teacher";
-        temperature = 0.2;
-        systemInstruction = `
-あなたは「${topic}」の教育者（先生AI）です。
-ユーザーが「わからない」と困っています。答えを丸ごと教えるのではなく、ユーザーが自力で考えられるように小さなヒントや問いかけを1〜2文で出してください。
-口調：優しく導くトーン（例:「大丈夫ですよ。まずは〜について思い出してみましょう」）。
+【判定基準】
+1. **先生AI (teacher) の介入条件**:
+   - ユーザーの発言に【明らかな科学的・事実的誤り】や【重大な誤解】が含まれている場合（例: 「光合成で臭素を使う」など）。
+   - ユーザーが「わからない」「ギブ」「忘れた」などと困っている場合。
+   ➡️ この場合、role: "teacher" として、優しく誤りを指摘・訂正し、正しい理解へ導くヒントを1〜2文で伝えてください。
+
+2. **生徒bot (student) の応答条件**:
+   - ユーザーの説明が概ね正しい、または筋が通っている場合。
+   ➡️ この場合、role: "student" として、ソクラテス式問答法で定義の確認や反例の問いかけ（Lv.${exchangeCount <= 1 ? "1: 初心者" : exchangeCount <= 3 ? "2: 見習い" : "3: 熟練者"}）を2〜3文で行ってください（ユーザーが言及していない未知の知識は先回りして喋らないこと）。
+
+【出力フォーマット】
+必ず以下のJSON形式のみを出力してください（Markdownのバッククォート不要）：
+{
+  "role": "teacher" または "student",
+  "reply": "発言内容"
+}
 `;
-      } else {
-        responderRole = "student";
-        systemInstruction = `
-あなたは「${topic}」について学ぶ賢明な生徒です。ソクラテス式問答法（産婆術）の原則に従ってユーザーと対話します。
 
-【行動指針】
-1. **事実の検証**: ユーザーの説明に明らかな学術的・論理的誤りがある場合のみ、先生（指導教官）を呼ぶように「あれ？〇〇という理解で合っていますか？」と疑問を呈してください。
-2. **先回り知識の禁止**: ユーザーがまだ言及していない専門知識を勝手に喋ることは厳禁です。
-3. **ソクラテス式問い返し**:
-   - **Lv.1 (初心者)**: 定義の明確化を促す（「それって具体的に何と何が関係しているんですか？」「日常で言うと？」）。
-   - **Lv.2 (見習い)**: 前提の検証・反例の提示（「もし〜という条件がなくなったらどう動くのですか？」「なぜそうなるのですか？」）。
-   - **Lv.3 (熟練者)**: 境界条件・応用性の吟味（「〜の場合とどう差別化されますか？」「これが破綻するとどんな影響が出ますか？」）。
-4. 2〜3文で簡潔に返答してください。
-`;
-      }
+      const contents = [
+        {
+          role: "user",
+          parts: [
+            {
+              text: `テーマ: ${topic}\nこれまでの会話履歴:\n${JSON.stringify(chatHistory, null, 2)}\n\n直前のユーザー発言: "${lastUserMessage}"\n\n判定および応答メッセージをJSONで生成してください。`,
+            },
+          ],
+        },
+      ];
 
-      contents = chatHistory.map((m: { role: string; content: string }) => ({
-        role: m.role === "user" ? "user" : "model",
-        parts: [{ text: m.content }],
-      }));
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: systemInstruction }] },
+          contents: contents,
+          generationConfig: {
+            temperature: 0.2,
+            responseMimeType: "application/json",
+          },
+        }),
+      });
+
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+
+      const parsed = JSON.parse(data.candidates[0].content.parts[0].text);
+      return NextResponse.json({ reply: parsed.reply, responderRole: parsed.role });
     } else if (mode === "review") {
-      responderRole = "teacher";
-      temperature = 0.2;
-
-      systemInstruction = `
+      const systemInstruction = `
 あなたは「${topic}」の専門家（先生AI）です。ユーザーが生徒に対して行った説明（対話ログ全体）を客観的・学術的に評価し、JSON形式で返却してください。
 
-必ず以下のJSONフォーマットのみを出力してください（Markdownタグ不要）：
+出力フォーマット（JSONのみ）:
 {
   "totalScore": 85,
   "accuracyScore": 35,
   "coverageScore": 25,
   "clarityScore": 25,
-  "goodPoints": ["〜の説明が正確だった", "〜のたとえが分かりやすかった"],
-  "improvementPoints": ["〜のメカニズムへの言及が不足していた"],
+  "goodPoints": ["〜の説明が正確だった"],
+  "improvementPoints": ["〜の誤りや言及不足があった"],
   "generalFeedback": "全体として〜"
 }
 `;
@@ -69,33 +84,26 @@ export async function POST(req: Request) {
         .map((m: { role: string; content: string }) => `${m.role === "user" ? "【ユーザー】" : "【応答】"}: ${m.content}`)
         .join("\n\n");
 
-      contents = [
-        {
-          role: "user",
-          parts: [{ text: `対話ログ:\n${historyText}` }],
-        },
-      ];
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: systemInstruction }] },
+          contents: [{ role: "user", parts: [{ text: `対話ログ:\n${historyText}` }] }],
+          generationConfig: {
+            temperature: 0.2,
+            responseMimeType: "application/json",
+          },
+        }),
+      });
+
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+
+      return NextResponse.json({ reply: data.candidates[0].content.parts[0].text, responderRole: "teacher" });
     }
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
-
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: systemInstruction }] },
-        contents: contents,
-        generationConfig: {
-          temperature: temperature,
-        },
-      }),
-    });
-
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-
-    const reply = data.candidates[0].content.parts[0].text;
-    return NextResponse.json({ reply, responderRole });
   } catch (error: any) {
     return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 });
   }
