@@ -8,7 +8,6 @@ import {
   serverTimestamp, 
   query, 
   where, 
-  orderBy, 
   onSnapshot 
 } from "firebase/firestore";
 import { 
@@ -94,17 +93,17 @@ export default function Home() {
     return () => unsubscribe();
   }, []);
 
-  // 2. ユーザーに紐づく過去セッションの購読 (Firestore)
+  // 2. ユーザーに紐づく過去セッションの購読（インデックス不要のクライアントソート）
   useEffect(() => {
     if (!user) {
       setHistorySessions([]);
       return;
     }
 
+    // orderByをクエリから外し、インデックス不要にする
     const q = query(
       collection(db, "learning_sessions"),
-      where("userId", "==", user.uid),
-      orderBy("createdAt", "asc")
+      where("userId", "==", user.uid)
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -112,9 +111,17 @@ export default function Home() {
         id: doc.id,
         ...doc.data(),
       })) as LearningSession[];
+
+      // クライアント側で作成日時順（昇順）にソート
+      sessions.sort((a, b) => {
+        const timeA = a.createdAt?.seconds || 0;
+        const timeB = b.createdAt?.seconds || 0;
+        return timeA - timeB;
+      });
+
       setHistorySessions(sessions);
     }, (error) => {
-      console.warn("Firestore index error or permission notice:", error);
+      console.error("Firestore Listen Error:", error);
     });
 
     return () => unsubscribe();
@@ -305,10 +312,10 @@ export default function Home() {
 
   // チャート用データ成形
   const chartData = historySessions.map((s, index) => ({
-    name: `${index + 1}. ${s.topic.slice(0, 6)}`,
+    name: `${index + 1}. ${(s.topic || "無題").slice(0, 5)}`,
     fullTopic: s.topic,
     総合点: s.scores?.total || 0,
-    正確性: (s.scores?.accuracy || 0) * 2.5, // 100点換算
+    正確性: (s.scores?.accuracy || 0) * 2.5,
     網羅性: Math.round(((s.scores?.coverage || 0) / 30) * 100),
     構成力: Math.round(((s.scores?.clarity || 0) / 30) * 100),
   }));
@@ -569,9 +576,9 @@ export default function Home() {
             {!user ? (
               <div className="text-center py-16 space-y-4">
                 <div className="text-4xl">🔒</div>
-                <h3 className="font-bold text-slate-700 text-lg">ログインして履歴を残そう</h3>
+                <h3 className="font-bold text-slate-700 text-lg">Googleログインしてスコアを記録しよう</h3>
                 <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                  Googleアカウントでログインすると、これまでの学習スコアの変移チャートやQB解説アーカイブをいつでも振り返ることができます。
+                  Googleアカウントでログインした状態で学習を完了すると、ここにスコア推移グラフとQB解説アーカイブが蓄積されます。
                 </p>
                 <button
                   onClick={handleLogin}
@@ -583,13 +590,16 @@ export default function Home() {
             ) : historySessions.length === 0 ? (
               <div className="text-center py-16 space-y-3">
                 <div className="text-4xl">📊</div>
-                <h3 className="font-bold text-slate-700 text-base">まだ学習データがありません</h3>
-                <p className="text-xs text-slate-500">「学習する」タブから生徒にテーマを教えて、最初のスコアを記録しましょう！</p>
+                <h3 className="font-bold text-slate-700 text-base">まだ保存されたデータがありません</h3>
+                <p className="text-xs text-slate-500">
+                  現在 <b>{user.displayName || user.email}</b> としてログインしています。<br />
+                  「学習する」タブからテーマを教えてセッションを完了（または途中で終了）すると、ここにグラフが表示されます！
+                </p>
                 <button
                   onClick={() => setActiveTab("study")}
                   className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-xl text-xs hover:bg-indigo-700 transition"
                 >
-                  学習を始める
+                  学習画面へ戻る
                 </button>
               </div>
             ) : (
@@ -597,8 +607,8 @@ export default function Home() {
                 {/* スコア推移チャート */}
                 <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
                   <div className="flex justify-between items-center">
-                    <h3 className="font-bold text-slate-800 text-sm">📈 スコア推移グラフ（最近のセッション）</h3>
-                    <span className="text-xs text-slate-500">{historySessions.length} 回のセッション</span>
+                    <h3 className="font-bold text-slate-800 text-sm">📈 スコア推移グラフ（学習履歴）</h3>
+                    <span className="text-xs text-slate-500 font-bold">{historySessions.length} 回の学習記録</span>
                   </div>
                   <div className="h-64 w-full">
                     <ResponsiveContainer width="100%" height="100%">
@@ -618,7 +628,7 @@ export default function Home() {
 
                 {/* 過去の学習アーカイブ一覧 */}
                 <div className="space-y-3">
-                  <h3 className="font-bold text-slate-800 text-sm">📚 過去の学習アーカイブ＆解説</h3>
+                  <h3 className="font-bold text-slate-800 text-sm">📚 学習アーカイブ＆QB解説</h3>
                   <div className="space-y-3">
                     {historySessions.slice().reverse().map((s) => (
                       <div key={s.id} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-2">
@@ -636,7 +646,7 @@ export default function Home() {
                         {s.feedback?.textbookSummary && (
                           <div className="mt-2 p-2.5 rounded-lg bg-slate-900 text-slate-200 text-xs space-y-1">
                             <span className="font-bold text-amber-400 block text-[11px]">📖 QB High-Yield 要点:</span>
-                            <p className="text-[11px] text-slate-300 line-clamp-2">{s.feedback.textbookSummary.coreConcept}</p>
+                            <p className="text-[11px] text-slate-300 leading-relaxed">{s.feedback.textbookSummary.coreConcept}</p>
                           </div>
                         )}
                       </div>
