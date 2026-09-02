@@ -9,7 +9,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Gemini API key is not configured." }, { status: 500 });
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
     // 1. 初期化：必須キーワードの生成
     if (mode === "init") {
@@ -37,47 +37,47 @@ export async function POST(req: Request) {
       return NextResponse.json({ keywords: parsed.keywords });
     }
 
-    // 2. 通常対話（体系化されたソクラテス式問答 + 段階的先生ヒント + キーワード判定）
+    // 2. 通常対話（キーワード判定 + ソクラテス問答 + 先生の段階的ヒント + 自動終了判定）
     if (mode === "chat") {
       const currentErrorLevel = errorCount || 0;
 
       const systemInstruction = `
-あなたは「${topic}」の体系化されたソクラテス式学習セッションを管理するAIシステムです。
+あなたは「${topic}」のソクラテス式学習セッションを管理するAIシステムです。
 
 【重要キーワード情報】
 ・全必須キーワード: ${JSON.stringify(targetKeywords || [])}
 ・すでにカバーされたキーワード: ${JSON.stringify(coveredKeywords || [])}
 
-【役割の判定基準】
-1. **先生AI (teacher) の介入条件**:
-   - ユーザーの発言に【明らかな科学的・事実的誤り】や【重大な誤解】が含まれている場合。
-   - ユーザーが「わからない」「ギブ」「忘れた」などと困っている場合。
-   ➡️ 介入深度レベル: ${currentErrorLevel + 1}
-      - レベル1（初回）: 答えは直接言わず、違和感の箇所に気づかせる最小限のヒント。
-      - レベル2（2回目）: 関連する構成要素やメカニズムを思い出すための誘導質問。
-      - レベル3以上（3回目〜）: 端的に正しい解説を行い、生徒役にもう一度説明してみるよう促す。
+【タスク】
+1. **キーワード判定**: 直前のユーザー発言で新しく正しく説明されたキーワードがあれば、\`newlyCoveredKeywords\` に入れてください。
+2. **全クリア判定**: すでにカバーされたものと今回カバーされたものを合わせて、全必須キーワードが網羅されたか判定してください。全網羅された場合、\`isAllCompleted\` を true にしてください。
 
-2. **生徒bot (student) の応答条件（ソクラテス式問答体系）**:
-   ユーザーの説明が筋の通ったものである場合、以下の【5つの問いの型】から対話の文脈やターン数に最適な1つを選択して質問してください（2〜3文）。
-   ※ ユーザーがまだ説明していない未知の専門知識を勝手に先回りして披露することは厳禁です。
+【役割と返答ロジック】
+- **全網羅時 (\`isAllCompleted: true\`) の場合**:
+  - role: "student"
+  - questionType: "理解完了"
+  - reply: 「完璧に理解できました！〇〇先生、とても分かりやすく教えてくださりありがとうございました！」と感謝してセッションを締めくくる言葉を述べてください。新たな質問はしないでください。
 
-   【ソクラテス式・問いの型カタログ】
-   - [型A: 定義・明確化] (序盤推奨): 概念の本質や日常への例えを深掘りする（例:「それって具体的にどういうことですか？」「日常の何に似ていますか？」）
-   - [型B: 前提・仮定の検証]: その説明の前提条件を問う（例:「その現象が成り立つには、どんな前提が必要なんですか？」）
-   - [型C: メカニズム・プロセスの探求]: 中間の仕組み・因果関係を問う（例:「なぜその結果につながるのですか？途中の仕組みはどう動くのですか？」）
-   - [型D: 視点・反例の吟味]: 反例や別条件をぶつける（例:「もし〜が欠けたらどうなりますか？」「似ている〇〇とは何が違うんですか？」）
-   - [型E: 影響・境界の推論] (終盤推奨): 破綻時の影響や応用性を問う（例:「もしこれが正常に機能しないと、全体にどんな連鎖反応が起きますか？」）
+- **全網羅前の場合**:
+  1. **先生AI (teacher) の介入条件**:
+     - ユーザーの発言に【明らかな事実・科学的誤り】や【重大な誤解】がある場合。
+     - 「わからない」「ギブ」「教えて」などと困っている場合。
+     ➡️ 介入深度: ${currentErrorLevel + 1}
+        - レベル1: 気づきを促す最小限のヒント。
+        - レベル2: 誘導的な質問。
+        - レベル3以上: 正しいメカニズムを端的に解説し、生徒役への再説明を促す。
+  2. **生徒bot (student) の応答条件**:
+     - ユーザーの説明が筋の通っている場合。
+     - 以下の問いの型から文脈に最適なものを1つ選び、2〜3文で問い返してください（先回り知識の披露は厳禁）。
+       - 定義・明確化 / 前提の検証 / メカニズムの探求 / 反例の吟味 / 影響・境界の推論
 
-【キーワード判定】
-直前のユーザー発言で新しく正しく言及・説明されたキーワードがあれば、\`newlyCoveredKeywords\` に抽出してください。
-
-【出力フォーマット】
-必ず以下のJSON形式のみを出力してください:
+【出力フォーマット（JSONのみ）】:
 {
   "role": "teacher" または "student",
-  "questionType": "定義・明確化" | "前提の検証" | "メカニズムの探求" | "反例の吟味" | "影響・境界の推論" | "先生のヒント",
+  "questionType": "定義・明確化" | "前提の検証" | "メカニズムの探求" | "反例の吟味" | "影響・境界の推論" | "先生のヒント" | "理解完了",
   "reply": "発言内容",
-  "newlyCoveredKeywords": ["言及されたキーワード"]
+  "newlyCoveredKeywords": ["言及されたキーワード"],
+  "isAllCompleted": boolean
 }
 `;
 
@@ -111,13 +111,16 @@ export async function POST(req: Request) {
         responderRole: parsed.role,
         questionType: parsed.questionType || "",
         newlyCoveredKeywords: parsed.newlyCoveredKeywords || [],
+        isAllCompleted: Boolean(parsed.isAllCompleted),
       });
     }
 
-    // 3. 採点モード
+    // 3. 採点・講評（QB形式の教科書解説つき）
     if (mode === "review") {
       const systemInstruction = `
-あなたは「${topic}」の教育評価AIです。対話ログ全体を客観的に評価してください。
+あなたは「${topic}」の専門指導医・教育評価AIです。
+医師国家試験の過去問集（Question Bank）の解説のように、ユーザーの回答へのフィードバックに加えて、試験対策・学術理解に直結する教科書的ハイライト解説（High-Yield 解説）を生成してください。
+
 全必須キーワード: ${JSON.stringify(targetKeywords || [])}
 カバー済みキーワード: ${JSON.stringify(coveredKeywords || [])}
 
@@ -127,9 +130,14 @@ export async function POST(req: Request) {
   "accuracyScore": 35,
   "coverageScore": 25,
   "clarityScore": 25,
-  "goodPoints": ["〜の説明が正確だった"],
-  "improvementPoints": ["〜の言及が不足していた"],
-  "generalFeedback": "全体として〜"
+  "goodPoints": ["〜の論理展開が明瞭だった"],
+  "improvementPoints": ["〜に関する言及が薄かった"],
+  "generalFeedback": "全体としての講評",
+  "textbookSummary": {
+    "coreConcept": "【基本概念・病態生理/概要】についての簡潔で本質的な解説（2〜3行）",
+    "keyMechanisms": ["要点1: 機構やポイント", "要点2: 機構やポイント", "要点3: 機構やポイント"],
+    "clinicalSignificance": "【臨床的意義 / 重要ポイント（国試・実務の要点）】についての解説"
+  }
 }
 `;
       const historyText = chatHistory
