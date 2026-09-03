@@ -1,24 +1,71 @@
 import { NextResponse } from "next/server";
 
+// Wikimedia Commonsから関連画像を検索する関数
+async function fetchWikimediaImage(query: string) {
+  try {
+    const endpoint = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(
+      query
+    )}&gsrnamespace=6&gsrlimit=1&prop=imageinfo&iiprop=url|extmetadata&format=json&origin=*`;
+
+    const res = await fetch(endpoint, {
+      headers: { "User-Agent": "TeachToLearnApp/1.0 (educational-tutor-app)" },
+    });
+    const data = await res.json();
+    if (!data.query || !data.query.pages) return null;
+
+    const pageKey = Object.keys(data.query.pages)[0];
+    const page = data.query.pages[pageKey];
+    if (!page.imageinfo || page.imageinfo.length === 0) return null;
+
+    const info = page.imageinfo[0];
+    return {
+      imageUrl: info.url,
+      title: page.title.replace(/^File:/i, "").replace(/\.[^/.]+$/, ""),
+      description: info.extmetadata?.ObjectName?.value || info.extmetadata?.ImageDescription?.value || page.title,
+    };
+  } catch (err) {
+    console.error("Wikimedia API error:", err);
+    return null;
+  }
+}
+
 export async function POST(req: Request) {
   try {
-    const { mode, topic, chatHistory, exchangeCount, lastUserMessage, targetKeywords, coveredKeywords, errorCount } = await req.json();
+    const { 
+      mode, 
+      topic, 
+      chatHistory, 
+      exchangeCount, 
+      lastUserMessage, 
+      targetCategories, 
+      coveredCategories, 
+      errorCount 
+    } = await req.json();
+    
     const apiKey = process.env.GEMINI_API_KEY;
-
     if (!apiKey) {
       return NextResponse.json({ error: "Gemini API key is not configured." }, { status: 500 });
     }
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
 
-    // 1. 初期化：必須キーワードの生成
+    // 1. 初期化：思考フレームワーク（病態・症状・診断・治療など4つの概念カテゴリ）
     if (mode === "init") {
       const systemInstruction = `
-あなたは教育カリキュラム作成の専門家です。
-「${topic}」を深く理解・説明する上で欠かせない必須コア概念・キーワードを4〜5個選定してください。
+あなたは医学・学術カリキュラムの設計者です。
+「${topic}」について、学習者がアウトプットすべき4つの概念カテゴリ（思考フレーム）を設計してください。
+※ 医学テーマ: 「病態・メカニズム」「症状・合併症」「診断・検査」「治療・管理」
+※ 一般テーマ: 「定義・背景」「構成・メカニズム」「影響・反例」「応用・対策」
+判定用の内部キーワード（internalKeywords）を各2〜3個設定してください（学習者には単語を直接見せません）。
+
 出力フォーマット（JSONのみ）:
 {
-  "keywords": ["キーワード1", "キーワード2", "キーワード3", "キーワード4"]
+  "categories": [
+    { "id": "cat_1", "name": "病態・メカニズム", "internalKeywords": ["主要因", "機序"] },
+    { "id": "cat_2", "name": "症状・合併症", "internalKeywords": ["臨床症状", "リスク"] },
+    { "id": "cat_3", "name": "診断・検査", "internalKeywords": ["検査法", "所見"] },
+    { "id": "cat_4", "name": "治療・管理", "internalKeywords": ["第一選択薬", "対処法"] }
+  ]
 }
 `;
       const res = await fetch(url, {
@@ -34,49 +81,42 @@ export async function POST(req: Request) {
       const data = await res.json();
       if (data.error) throw new Error(data.error.message);
       const parsed = JSON.parse(data.candidates[0].content.parts[0].text);
-      return NextResponse.json({ keywords: parsed.keywords });
+      return NextResponse.json({ categories: parsed.categories });
     }
 
-    // 2. 通常対話（キーワード判定 + ソクラテス問答 + 先生の段階的ヒント + 自動終了判定）
+    // 2. 通常対話：カテゴリ判定 + ソクラテス問答 + 先生の介入
     if (mode === "chat") {
       const currentErrorLevel = errorCount || 0;
 
       const systemInstruction = `
 あなたは「${topic}」のソクラテス式学習セッションを管理するAIシステムです。
 
-【重要キーワード情報】
-・全必須キーワード: ${JSON.stringify(targetKeywords || [])}
-・すでにカバーされたキーワード: ${JSON.stringify(coveredKeywords || [])}
+【思考カテゴリ情報】
+全カテゴリ: ${JSON.stringify(targetCategories || [])}
+達成済みID: ${JSON.stringify(coveredCategories || [])}
 
 【タスク】
-1. **キーワード判定**: 直前のユーザー発言で新しく正しく説明されたキーワードがあれば、\`newlyCoveredKeywords\` に入れてください。
-2. **全クリア判定**: すでにカバーされたものと今回カバーされたものを合わせて、全必須キーワードが網羅されたか判定してください。全網羅された場合、\`isAllCompleted\` を true にしてください。
+1. 直前のユーザー発言で未達成カテゴリの内容が説明されていれば \`newlyCoveredCategoryIds\` に追加。
+2. 4つのカテゴリがすべて網羅されたら \`isAllCompleted: true\`。
 
-【役割と返答ロジック】
-- **全網羅時 (\`isAllCompleted: true\`) の場合**:
+【応答方針】
+- 全網羅時 (\`isAllCompleted: true\`):
   - role: "student"
   - questionType: "理解完了"
-  - reply: 「完璧に理解できました！〇〇先生、とても分かりやすく教えてくださりありがとうございました！」と感謝してセッションを締めくくる言葉を述べてください。新たな質問はしないでください。
-
-- **全網羅前の場合**:
-  1. **先生AI (teacher) の介入条件**:
-     - ユーザーの発言に【明らかな事実・科学的誤り】や【重大な誤解】がある場合。
-     - 「わからない」「ギブ」「教えて」などと困っている場合。
-     ➡️ 介入深度: ${currentErrorLevel + 1}
-        - レベル1: 気づきを促す最小限のヒント。
-        - レベル2: 誘導的な質問。
-        - レベル3以上: 正しいメカニズムを端的に解説し、生徒役への再説明を促す。
-  2. **生徒bot (student) の応答条件**:
-     - ユーザーの説明が筋の通っている場合。
-     - 以下の問いの型から文脈に最適なものを1つ選び、2〜3文で問い返してください（先回り知識の披露は厳禁）。
-       - 定義・明確化 / 前提の検証 / メカニズムの探求 / 反例の吟味 / 影響・境界の推論
+  - reply: 「先生、全体のつながりが非常にクリアに理解できました！丁寧に教えてくださりありがとうございました！」と締めくくる。
+- 全網羅前:
+  1. 先生AI (teacher) の介入条件:
+     - 明白な事実誤認・誤解がある場合、または「わからない」「教えて」「ギブ」等のヘルプ要請時。
+     - 介入レベル: ${currentErrorLevel + 1}（Lv.1: 軽い気づきの問いかけ ➔ Lv.2: 誘導ヒント ➔ Lv.3: 端的な解説と再説明の促し）
+  2. 生徒bot (student) の応答条件:
+     - 説明が妥当なら、ソクラテス式の型（定義・明確化 / 前提の検証 / メカニズムの探求 / 反例・鑑別の吟味 / 影響・境界の推論）から最適なものを1つ選んで2〜3文で質問。
 
 【出力フォーマット（JSONのみ）】:
 {
   "role": "teacher" または "student",
-  "questionType": "定義・明確化" | "前提の検証" | "メカニズムの探求" | "反例の吟味" | "影響・境界の推論" | "先生のヒント" | "理解完了",
+  "questionType": "定義・明確化" | "前提の検証" | "メカニズムの探求" | "反例・鑑別の吟味" | "影響・境界の推論" | "先生のヒント" | "理解完了",
   "reply": "発言内容",
-  "newlyCoveredKeywords": ["言及されたキーワード"],
+  "newlyCoveredCategoryIds": ["cat_1"],
   "isAllCompleted": boolean
 }
 `;
@@ -84,11 +124,7 @@ export async function POST(req: Request) {
       const contents = [
         {
           role: "user",
-          parts: [
-            {
-              text: `対話ログ:\n${JSON.stringify(chatHistory, null, 2)}\n\n直前のユーザー発言: "${lastUserMessage}"`,
-            },
-          ],
+          parts: [{ text: `対話ログ:\n${JSON.stringify(chatHistory, null, 2)}\n\n直前のユーザー発言: "${lastUserMessage}"` }],
         },
       ];
 
@@ -110,19 +146,26 @@ export async function POST(req: Request) {
         reply: parsed.reply,
         responderRole: parsed.role,
         questionType: parsed.questionType || "",
-        newlyCoveredKeywords: parsed.newlyCoveredKeywords || [],
+        newlyCoveredCategoryIds: parsed.newlyCoveredCategoryIds || [],
         isAllCompleted: Boolean(parsed.isAllCompleted),
       });
     }
 
-    // 3. 採点・講評（QB形式の教科書解説つき）
+    // 3. 採点・QBスタイル解説・Mermaid病態図・画像検索
     if (mode === "review") {
       const systemInstruction = `
-あなたは「${topic}」の専門指導医・教育評価AIです。
-医師国家試験の過去問集（Question Bank）の解説のように、ユーザーの回答へのフィードバックに加えて、試験対策・学術理解に直結する教科書的ハイライト解説（High-Yield 解説）を生成してください。
+あなたは「${topic}」の指導医・専門評価官です。
+QB（Question Bank）形式の解説スタイルで学習者の説明を評価し、洗練された病態解説を作成してください。
 
-全必須キーワード: ${JSON.stringify(targetKeywords || [])}
-カバー済みキーワード: ${JSON.stringify(coveredKeywords || [])}
+【画像検索用クエリ】
+Wikimedia Commonsでこのテーマに最も適した学術・医学画像（模式図、病理組織像、内視鏡、解剖図）がヒットする英語検索クエリ（imageSearchQuery）を出力してください。
+例:
+- 胃潰瘍 ➔ "Gastric ulcer endoscopy"
+- 心筋梗塞 ➔ "Myocardial infarction diagram"
+- 光合成 ➔ "Photosynthesis light reaction diagram"
+
+【Mermaidダイアグラム】
+病態の因果関係・メカニズム（原因 ➔ 変化 ➔ 症状）を表すMermaidフローチャート（\`graph TD\`）を出力してください。
 
 出力フォーマット（JSONのみ）:
 {
@@ -130,13 +173,15 @@ export async function POST(req: Request) {
   "accuracyScore": 35,
   "coverageScore": 25,
   "clarityScore": 25,
-  "goodPoints": ["〜の論理展開が明瞭だった"],
-  "improvementPoints": ["〜に関する言及が薄かった"],
-  "generalFeedback": "全体としての講評",
+  "goodPoints": ["〜の説明が正確だった"],
+  "improvementPoints": ["〜の言及が不足していた"],
+  "generalFeedback": "全体講評",
+  "imageSearchQuery": "英語検索クエリ",
   "textbookSummary": {
-    "coreConcept": "【基本概念・病態生理/概要】についての簡潔で本質的な解説（2〜3行）",
-    "keyMechanisms": ["要点1: 機構やポイント", "要点2: 機構やポイント", "要点3: 機構やポイント"],
-    "clinicalSignificance": "【臨床的意義 / 重要ポイント（国試・実務の要点）】についての解説"
+    "coreConcept": "【基本概念・病態生理】の本質的解説",
+    "keyMechanisms": ["機序1の説明", "機序2の説明", "機序3の説明"],
+    "clinicalSignificance": "【臨床的意義・国試/実務の急所】",
+    "mermaidGraph": "graph TD\\n  A[原因] --> B[機序]\\n  B --> C[結果]"
   }
 }
 `;
@@ -157,7 +202,21 @@ export async function POST(req: Request) {
       const data = await res.json();
       if (data.error) throw new Error(data.error.message);
 
-      return NextResponse.json({ reply: data.candidates[0].content.parts[0].text, responderRole: "teacher" });
+      const parsedReview = JSON.parse(data.candidates[0].content.parts[0].text);
+
+      let imageData = null;
+      if (parsedReview.imageSearchQuery) {
+        imageData = await fetchWikimediaImage(parsedReview.imageSearchQuery);
+      }
+
+      if (parsedReview.textbookSummary && imageData) {
+        parsedReview.textbookSummary.image = imageData;
+      }
+
+      return NextResponse.json({ 
+        reply: JSON.stringify(parsedReview), 
+        responderRole: "teacher" 
+      });
     }
   } catch (error: any) {
     return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 });
